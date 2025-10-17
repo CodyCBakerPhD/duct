@@ -44,7 +44,7 @@ def test_sanity_green(caplog: pytest.LogCaptureFixture, temp_output_dir: str) ->
 
 def test_execution_summary(temp_output_dir: str) -> None:
     args = Arguments.from_argv(
-        ["sleep", "0.1"],
+        ["sleep", "1.0"],
         sample_interval=0.05,  # small enough to ensure we collect at least 1 sample
         report_interval=0.1,
         output_prefix=temp_output_dir,
@@ -58,6 +58,7 @@ def test_execution_summary(temp_output_dir: str) -> None:
     assert execution_summary["peak_pmem"] < 10
     assert execution_summary["average_pcpu"] < 10
     assert execution_summary["peak_pcpu"] < 10
+
     assert execution_summary["exit_code"] == 0
     assert execution_summary["working_directory"] == os.getcwd()
 

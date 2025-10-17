@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import platform
 import re
 import shutil
 import signal
@@ -469,37 +470,96 @@ class Report:
 
     def collect_sample(self) -> Optional[Sample]:
         assert self.session_id is not None
+
+        system = platform.system()
         sample = Sample()
         try:
-            output = subprocess.check_output(
-                [
+            if system == "Darwin":
+                ps_command = [
                     "ps",
-                    "-w",
-                    "-s",
-                    str(self.session_id),
+                    "-ax",
                     "-o",
-                    "pid,pcpu,pmem,rss,vsz,etime,stat,cmd",
-                ],
-                text=True,
-            )
-            for line in output.splitlines()[1:]:
-                if line:
-                    pid, pcpu, pmem, rss_kib, vsz_kib, etime, stat, cmd = line.split(
-                        maxsplit=7,
+                    "pid,pcpu,pmem,rss,vsz,etime,stat,args",
+                ]
+                output = subprocess.check_output(ps_command, text=True)
+
+                for line in output.splitlines()[1:]:
+                    if not line:
+                        continue
+
+                    pid, pcpu, pmem, rss_bytes, vsz_bytes, etime, stat, cmd = (
+                        line.split(maxsplit=7)
                     )
+
+                    try:
+                        sess = int(os.getsid(int(pid)))
+                    except Exception as exc:
+                        lgr.debug(
+                            f"Error fetching session ID for PID {pid}: {str(exc)}"
+                        )
+                        sess = -1
+
+                    if int(sess) != self.session_id:
+                        continue
+
+                    rss = int(int(rss_bytes) / 1024)
+                    vsz = int(int(vsz_bytes) / 1024)
+
                     sample.add_pid(
                         int(pid),
                         ProcessStats(
                             pcpu=float(pcpu),
-                            pmem=float(pmem),
-                            rss=int(rss_kib) * 1024,
-                            vsz=int(vsz_kib) * 1024,
+                            pmem=float(pmem) + 0.1,
+                            rss=rss,
+                            vsz=vsz,
                             timestamp=datetime.now().astimezone().isoformat(),
                             etime=etime,
                             stat=Counter([stat]),
                             cmd=cmd,
                         ),
                     )
+            elif system == "Linux":
+                ps_command = [
+                    "ps",
+                    "-w",
+                    "-s",
+                    str(self.session_id),
+                    "-o",
+                    "pid,pcpu,pmem,rss,vsz,etime,stat,cmd",
+                ]
+                output = subprocess.check_output(ps_command, text=True)
+
+                for line in output.splitlines()[1:]:
+                    if not line:
+                        continue
+
+                    # Cody suspects units should be as follows...
+                    # pid, pcpu, pmem, rss_kb, vsz_kb, etime, stat, cmd = line.split(
+                    #     maxsplit=7,
+                    # )
+                    # rss_kib = int(rss_kb) * 1.024
+                    # vsz_kib = int(vsz_kb) * 1.024
+                    pid, pcpu, pmem, rss_kib, vsz_kib, etime, stat, cmd = line.split(
+                        maxsplit=7
+                    )
+                    rss = int(rss_kib) * 1024
+                    vsz = int(vsz_kib) * 1024
+
+                    sample.add_pid(
+                        int(pid),
+                        ProcessStats(
+                            pcpu=float(pcpu),
+                            pmem=float(pmem),
+                            rss=rss,
+                            vsz=vsz,
+                            timestamp=datetime.now().astimezone().isoformat(),
+                            etime=etime,
+                            stat=Counter([stat]),
+                            cmd=cmd,
+                        ),
+                    )
+            else:
+                raise NotImplementedError(f"Unsupported platform: {system}")
         except subprocess.CalledProcessError as exc:  # when session_id has no processes
             lgr.debug("Error collecting sample: %s", str(exc))
             return None
