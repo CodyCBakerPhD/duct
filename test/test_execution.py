@@ -4,6 +4,7 @@ import logging
 import multiprocessing
 import os
 from pathlib import Path
+import platform
 import signal
 import subprocess
 import sys
@@ -54,6 +55,7 @@ def test_execution_summary(temp_output_dir: str) -> None:
         info_dict = json.loads(info.read())
     execution_summary = info_dict["execution_summary"]
     # Since resources used should be small lets make sure values are roughly sane
+
     assert execution_summary["average_pmem"] < 10
     assert execution_summary["peak_pmem"] < 10
     assert execution_summary["average_pcpu"] < 10
