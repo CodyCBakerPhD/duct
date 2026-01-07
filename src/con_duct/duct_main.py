@@ -31,20 +31,31 @@ _true_set = {"yes", "true", "t", "y", "1"}
 _false_set = {"no", "false", "f", "n", "0"}
 
 
-def _str2bool(value: str | bool | None) -> bool | None:
-    if value is None:
-        return False
-    if isinstance(value, bool):
-        return value
+def _str2bool(value: str) -> bool | None:
+    """
+    Convert a string representing truth to `True` or `False`.
 
-    val_lower = value.lower()
-    if val_lower in _true_set:
+    Parameters
+    ----------
+    value : str
+        The string to convert.
+
+    Returns
+    -------
+    bool | None
+        Returns `True` for a string representing true and `False` for a string
+        representing false. Returns `None` if the string is not a valid string
+        representing truth. Valid strings are the unions of
+        `_true_set` and `_false_set` taken case-insensitively.
+    """
+    value = value.lower()
+    if value in _true_set:
         return True
-    elif val_lower in _false_set:
+    if value in _false_set:
         return False
-    else:
-        raise ValueError(f"Cannot interpret '{value}' as boolean.")
 
+    # The input value is not a valid representation of a boolean value
+    return None
 
 is_mac_intel = sys.platform == "darwin" and os.uname().machine == "x86_64"
 if is_mac_intel and not _str2bool(value=os.getenv("DUCT_IGNORE_INTEL_WARNING")):
