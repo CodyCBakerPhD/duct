@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
-from collections import Counter
+from collections import Counter, deque
 from collections.abc import Iterable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -10,6 +10,7 @@ import json
 import logging
 import math
 import os
+import platform
 import re
 import shutil
 import signal
@@ -20,11 +21,12 @@ import sys
 import threading
 import time
 from types import FrameType
-from typing import IO, Any, Optional, TextIO
+from typing import IO, Any, Callable, Optional, TextIO
 
 __version__ = version("con-duct")
 __schema_version__ = "0.2.2"
 
+SYSTEM = platform.system()
 
 lgr = logging.getLogger("con-duct")
 DEFAULT_LOG_LEVEL = os.environ.get("DUCT_LOG_LEVEL", "INFO").upper()
@@ -321,6 +323,126 @@ class Sample:
         return d
 
 
+def _get_sample_linux(session_id: int) -> Sample:
+    sample = Sample()
+
+    ps_command = [
+        "ps",
+        "-w",
+        "-s",
+        str(session_id),
+        "-o",
+        "pid,pcpu,pmem,rss,vsz,etime,stat,cmd",
+    ]
+    output = subprocess.check_output(ps_command, text=True)
+
+    for line in output.splitlines()[1:]:
+        if not line:
+            continue
+
+        pid, pcpu, pmem, rss_kib, vsz_kib, etime, stat, cmd = line.split(maxsplit=7)
+
+        sample.add_pid(
+            pid=int(pid),
+            stats=ProcessStats(
+                pcpu=float(pcpu),
+                pmem=float(pmem),
+                rss=int(rss_kib) * 1024,
+                vsz=int(vsz_kib) * 1024,
+                timestamp=datetime.now().astimezone().isoformat(),
+                etime=etime,
+                stat=Counter([stat]),
+                cmd=cmd,
+            ),
+        )
+    sample.averages = Averages.from_sample(sample=sample)
+    return sample
+
+
+def _try_to_get_sid(pid: int) -> int:
+    """
+    It is possible that the `pid` returned by the top `ps` call no longer exists at time of `getsid` request.
+    """
+    try:
+        return os.getsid(pid)
+    except ProcessLookupError as exc:
+        lgr.debug(f"Error fetching session ID for PID {pid}: {str(exc)}")
+        return -1
+
+
+def _get_ps_lines_mac() -> list[str]:
+    ps_command = [
+        "ps",
+        "-ax",
+        "-o",
+        "pid,pcpu,pmem,rss,vsz,etime,stat,args",
+    ]
+    output = subprocess.check_output(ps_command, text=True)
+
+    lines = [line for line in output.splitlines()[1:] if line]
+    return lines
+
+
+def _add_pid_to_sample_from_line_mac(
+    line: str, pid_to_matching_sid: dict[int, int], sample: Sample
+) -> None:
+    pid, pcpu, pmem, rss_kb, vsz_kb, etime, stat, cmd = line.split(maxsplit=7)
+
+    if pid_to_matching_sid.get(int(pid)) is not None:
+        sample.add_pid(
+            pid=int(pid),
+            stats=ProcessStats(
+                pcpu=float(pcpu),
+                pmem=float(pmem),
+                rss=int(rss_kb) * 1024,
+                vsz=int(vsz_kb) * 1024,
+                timestamp=datetime.now().astimezone().isoformat(),
+                etime=etime,
+                stat=Counter([stat]),
+                cmd=cmd,
+            ),
+        )
+
+
+def _get_sample_mac(session_id: int) -> Optional[Sample]:
+    sample = Sample()
+
+    lines = _get_ps_lines_mac()
+    pid_to_matching_sid = {
+        pid: sid
+        for line in lines
+        if (sid := _try_to_get_sid(pid=(pid := int(line.split(maxsplit=1)[0]))))
+        == session_id
+    }
+
+    if not pid_to_matching_sid:
+        lgr.debug(f"No processes found for session ID {session_id}.")
+        return None
+
+    # collections.dequeue with maxlen=0 is used to approximate the
+    # performance of list comprehension (superior to basic for-loop)
+    # and also does not store `None` (or other) return values
+    deque(
+        (
+            _add_pid_to_sample_from_line_mac(  # type: ignore[func-returns-value]
+                line=line, pid_to_matching_sid=pid_to_matching_sid, sample=sample
+            )
+            for line in lines
+        ),
+        maxlen=0,
+    )
+
+    sample.averages = Averages.from_sample(sample=sample)
+    return sample
+
+
+_get_sample_per_system = {
+    "Linux": _get_sample_linux,
+    "Darwin": _get_sample_mac,
+}
+_get_sample: Callable[[int], Optional[Sample]] = _get_sample_per_system[SYSTEM]  # type: ignore[assignment]
+
+
 class Report:
     """Top level report"""
 
@@ -431,43 +553,12 @@ class Report:
 
     def collect_sample(self) -> Optional[Sample]:
         assert self.session_id is not None
-        sample = Sample()
         try:
-            output = subprocess.check_output(
-                [
-                    "ps",
-                    "-w",
-                    "-s",
-                    str(self.session_id),
-                    "-o",
-                    "pid,pcpu,pmem,rss,vsz,etime,stat,cmd",
-                ],
-                text=True,
-            )
-            for line in output.splitlines()[1:]:
-                if line:
-                    pid, pcpu, pmem, rss_kib, vsz_kib, etime, stat, cmd = line.split(
-                        maxsplit=7,
-                    )
-                    sample.add_pid(
-                        int(pid),
-                        ProcessStats(
-                            pcpu=float(pcpu),
-                            pmem=float(pmem),
-                            rss=int(rss_kib) * 1024,
-                            vsz=int(vsz_kib) * 1024,
-                            timestamp=datetime.now().astimezone().isoformat(),
-                            etime=etime,
-                            stat=Counter([stat]),
-                            cmd=cmd,
-                        ),
-                    )
+            sample = _get_sample(self.session_id)
+            return sample
         except subprocess.CalledProcessError as exc:  # when session_id has no processes
             lgr.debug("Error collecting sample: %s", str(exc))
             return None
-
-        sample.averages = Averages.from_sample(sample)
-        return sample
 
     def update_from_sample(self, sample: Sample) -> None:
         self.full_run_stats = self.full_run_stats.aggregate(sample)
@@ -836,12 +927,22 @@ def remove_files(log_paths: LogPaths, assert_empty: bool = False) -> None:
             os.remove(file_path)
 
 
-class ProcessSignalHandler:
+class SigIntHandler:
+    """
+    Handler of SIGINT signals received by the process running duct.
+    """
+
     def __init__(self, pid: int) -> None:
+        """
+        Parameters
+        ----------
+        pid : int
+            The PID of the process monitored by duct
+        """
         self.pid: int = pid
         self.sigcount: int = 0
 
-    def handle_signal(self, _sig: int, _frame: Optional[FrameType]) -> None:
+    def __call__(self, _sig: int, _frame: Optional[FrameType]) -> None:
         self.sigcount += 1
         if self.sigcount == 1:
             lgr.info("Received SIGINT, passing to command")
@@ -931,8 +1032,7 @@ def execute(
         lgr.error("%s: command not found", command)
         return 127  # seems what zsh and bash return then
 
-    handler = ProcessSignalHandler(process.pid)
-    signal.signal(signal.SIGINT, handler.handle_signal)
+    signal.signal(signal.SIGINT, SigIntHandler(process.pid))
     lgr.info("duct %s is executing %r...", __version__, full_command)
     lgr.info("Log files will be written to %s", log_paths.prefix)
     try:
