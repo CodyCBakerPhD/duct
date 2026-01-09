@@ -550,3 +550,6 @@ def main(argv: Optional[List[str]] = None) -> None:
     setup_logging(args)
     _replay_early_logs(env_log_buffer)
     sys.exit(execute(args))
+
+if __name__ == "__main__":
+    main()
